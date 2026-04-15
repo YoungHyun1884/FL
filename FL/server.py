@@ -1,10 +1,6 @@
 """FedSTO server.
-
-The server holds the labeled dataset. Responsibilities:
-  - Warmup: supervised pretraining on labeled data before FL starts.
-  - Post-aggregation update (Phase 1 & 2): after receiving the aggregated client
-    update, fine-tune on labeled data. In Phase 2 the SRIP penalty is added
-    to the non-backbone weights, matching the clients' objective.
+  - client는 unlabeled 데이터로 local adaptation을 담당한다.
+  - server는 labeled 데이터로 global drift를 보정하는 역할을 맡는다.
 """
 from __future__ import annotations
 from typing import Iterator
@@ -53,10 +49,11 @@ class Server:
         return self._opt
 
     def reset_optimizer(self) -> None:
-        """Re-create the optimizer (call between phases to reset momentum)."""
+        """옵티마이저를 다시 만든다. 단계 사이에서 모멘텀을 초기화할 때 사용한다."""
         self._opt = None
 
     def _supervised_step(self, opt, use_ortho: bool) -> float:
+        # 집계 후 서버는 레이블 배치로 다시 한 번 정답 기반 보정을 한다.
         batch = self._next_batch()
         images = batch["images"].to(self.device)
         raw_targets = batch["targets"]
@@ -69,6 +66,7 @@ class Server:
         loss_dict = self.model.supervised_loss(images, targets)
         loss = sum(loss_dict.values())
         if use_ortho:
+            # 2단계에서는 클라이언트 목적함수와 맞추기 위해 서버도 같은 정규화를 사용한다.
             ortho = srip_penalty(
                 self.model.non_backbone_weight_matrices(),
                 n_iters=self.cfg.ortho_power_iters,
@@ -80,7 +78,8 @@ class Server:
         return float(loss.detach())
 
     def warmup(self) -> float:
-        """Warmup: supervised pretraining for warmup_rounds epochs over labeled data."""
+        """사전학습 단계에서 레이블 데이터를 warmup_rounds 동안 지도학습한다."""
+        # 연합학습 전에 서버가 먼저 레이블 데이터로 detector를 안정화한다.
         self.model.train()
         self.reset_optimizer()
         opt = self._ensure_optimizer()
@@ -89,7 +88,7 @@ class Server:
         for _rnd in range(self.cfg.warmup_rounds):
             for batch in self.loader:
                 batch_data = batch
-                # push to device inline
+                # 레이블 데이터는 이미 collate 단계에서 YOLO 타깃 형식으로 정리돼 있다.
                 images = batch_data["images"].to(self.device)
                 raw_targets = batch_data["targets"]
                 if isinstance(raw_targets, dict):
@@ -105,11 +104,12 @@ class Server:
                 opt.step()
                 total += float(loss.detach())
                 n_steps += 1
-        # Reset optimizer after warmup so Phase 1 starts fresh
+        # warmup에서 쌓인 모멘텀을 넘기지 않도록 optimizer를 다시 초기화한다.
         self.reset_optimizer()
         return total / max(n_steps, 1)
 
     def update(self, use_ortho: bool) -> float:
+        # 각 round에서 집계 직후 server_steps만큼 지도 보정을 수행한다.
         self.model.train()
         opt = self._ensure_optimizer()
         total = 0.0

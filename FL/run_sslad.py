@@ -1,18 +1,12 @@
-"""End-to-end FedSTO run with YOLOv5 on the SSLAD-2D dataset.
+"""
+    FedSTO + YOLOv5 on SSLAD-2D
+    1) 서버는 labeled train을 사용해 먼저 warmup을 수행한다.
+    2) 각 client는 자기 unlabeled 이미지에 대해 local EMA teacher로
+       pseudo label을 만든 뒤 student를 업데이트한다.
+    3) client 업데이트를 서버가 FedAvg로 합친다.
+    4) 서버는 labeled 데이터로 한 번 더 supervised refinement를 수행한다.
+    5) 위 과정을 Phase 1/2 규칙에 맞게 반복한다.
 
-Pipeline matches Algorithm 1 of the paper:
-    Warmup (server supervised on labeled train)
-      -> Phase 1: Selective Training (client backbone only, unlabeled)
-      -> Phase 2: FPT + Orthogonal Enhancement
-
-Dataset layout expected under DATA_ROOT:
-    labeled/labeled_trainval/SSLAD-2D/labeled/
-        annotations/instance_train.json, instance_val.json
-        train/*.jpg, val/*.jpg
-    labeled/labeled_test/SSLAD-2D/labeled/
-        annotations/instance_test.json
-        test/*.jpg
-    unlabeled/SSLAD-2D/unlabel/image_0/*.jpg
 """
 from __future__ import annotations
 import argparse
@@ -26,7 +20,7 @@ from .orchestrator import FedSTO
 from .server import Server
 from .client import Client
 from .yolov5_detector import YOLOv5Detector
-from .yolo_dataset import (
+from .sslad_dataset import (
     SSLAD2DDataset,
     NUM_SSLAD_CLASSES,
     labeled_yolo_collate,
@@ -36,7 +30,7 @@ from .yolo_dataset import (
 
 
 # =====================================================================
-# Default paths (adjust or pass via CLI)
+# 기본 경로 (필요하면 CLI로 덮어쓸 수 있음)
 # =====================================================================
 DATA_ROOT = Path("/home/pyh/바탕화면/FL/dataset")
 
@@ -51,11 +45,14 @@ UNLABELED_IMG_DIR = DATA_ROOT / "unlabeled" / "SSLAD-2D" / "unlabel" / "image_0"
 
 @torch.no_grad()
 def evaluate(model: YOLOv5Detector, val_ds, device: str, rnd: int, phase: str):
-    """Evaluate: mean supervised loss on the held-out labeled val set."""
+    """분리된 레이블 검증셋에서 평균 지도 손실을 계산한다."""
+    # 검증은 항상 레이블 validation set으로만 수행한다.
+    # 즉, 가짜 라벨 품질을 직접 보는 대신 "현재 전역 모델이
+    # 실제 정답 라벨에 대해 얼마나 잘 맞는지"를 loss로 추적한다.
     loader = DataLoader(val_ds, batch_size=8, collate_fn=labeled_yolo_collate,
                         num_workers=4, pin_memory=True)
     model.eval()
-    model.yolo.train()  # ComputeLoss needs train-mode raw outputs
+    model.yolo.train()  # ComputeLoss는 train 모드의 raw output을 사용한다.
     total, n = 0.0, 0
     for batch in loader:
         imgs = batch["images"].to(device)
@@ -63,7 +60,7 @@ def evaluate(model: YOLOv5Detector, val_ds, device: str, rnd: int, phase: str):
         loss_dict = model.supervised_loss(imgs, tgts)
         total += float(sum(loss_dict.values()).detach())
         n += 1
-        if n >= 50:  # cap for speed
+        if n >= 50:  # 속도를 위해 상한을 둔다.
             break
     mean_loss = total / max(n, 1)
     print(f"  [eval@{phase}:r{rnd}] val_det_loss={mean_loss:.4f}")
@@ -71,7 +68,9 @@ def evaluate(model: YOLOv5Detector, val_ds, device: str, rnd: int, phase: str):
 
 
 def build_yolo(num_classes: int, pretrained: bool = True):
-    """Factory for YOLOv5Detector instances (COCO-pretrained by default)."""
+    """YOLOv5Detector 인스턴스를 만드는 함수다. 기본값은 COCO 사전학습이다."""
+    # 모든 서버 / 클라이언트 / 전역 모델은 같은 YOLO 래퍼를 사용한다.
+    # 차이는 "어느 데이터로 어떤 손실을 계산하느냐"에 있다.
     return YOLOv5Detector(
         num_classes=num_classes,
         tau_high=0.5,
@@ -129,7 +128,10 @@ def main():
     num_classes = NUM_SSLAD_CLASSES  # 6
     img_size = args.img_size
 
-    # ---- Datasets ----
+    # ---- 데이터셋 ----
+    # 레이블 데이터는 서버 전용이다.
+    # train_ds: 사전학습 + 각 라운드 이후 서버 지도 보정용
+    # val_ds: 전역 모델 성능 확인용
     print("Loading labeled train dataset...")
     train_ds = SSLAD2DDataset(
         img_dir=str(TRAIN_IMG_DIR),
@@ -147,6 +149,8 @@ def main():
     print(f"  val: {len(val_ds)} images")
 
     print("Splitting unlabeled images into non-IID clients...")
+    # 비라벨 데이터는 파일명 속 city code 기준으로 클라이언트별로 나눈다.
+    # 따라서 각 클라이언트는 서로 다른 분포를 가진 non-IID 환경을 흉내 내게 된다.
     client_datasets = make_non_iid_clients_sslad(
         img_dir=str(UNLABELED_IMG_DIR),
         num_clients=args.num_clients,
@@ -154,15 +158,22 @@ def main():
         max_per_client=args.max_per_client,
     )
 
-    # ---- DataLoaders ----
+    # ---- 데이터로더 ----
+    # 서버는 레이블 loader를, 각 클라이언트는 비라벨 loader를 가진다.
     server_loader = DataLoader(
         train_ds, batch_size=args.batch_size, shuffle=True,
         collate_fn=labeled_yolo_collate, drop_last=True,
         num_workers=args.num_workers, pin_memory=True,
     )
 
-    # ---- Models ----
+    # ---- 모델 ----
     use_pretrained = not args.no_pretrained
+    # server.model:
+    #   서버가 레이블 데이터로 직접 업데이트하는 모델
+    # global_model:
+    #   클라이언트들에게 전파되는 전역 기준 모델
+    # client.model:
+    #   각 클라이언트에서 local EMA teacher와 함께 학습되는 student 모델
     server = Server(model=build_yolo(num_classes, pretrained=use_pretrained), loader=server_loader, cfg=cfg)
     global_model = build_yolo(num_classes, pretrained=use_pretrained)
 
@@ -184,6 +195,9 @@ def main():
     def eval_hook(model, rnd, phase):
         return evaluate(model, val_ds, cfg.device, rnd, phase)
 
+    # FedSTO.run() 안에서 실제 데이터 흐름은 다음 순서로 진행된다.
+    # 사전학습 -> 클라이언트 로컬 가짜 라벨 학습 -> 집계
+    # -> 서버 레이블 보정 -> 평가
     trainer = FedSTO(
         global_model=global_model,
         server=server,

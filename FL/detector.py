@@ -1,15 +1,8 @@
-"""Detector interface for FedSTO.
-
-To plug in YOLOv5/YOLOv8/Faster-RCNN/etc., subclass `BaseDetector` and:
-  1. Place backbone submodules under names listed in `BACKBONE_PREFIXES`.
-  2. Place neck/head submodules under names listed in `NON_BACKBONE_PREFIXES`.
-  3. Implement `supervised_loss(images, targets) -> dict[str, Tensor]`.
-  4. Implement `unsupervised_loss(images, teacher) -> dict[str, Tensor]`
-     using `teacher` (another BaseDetector instance, typically the local EMA)
-     to generate pseudo labels internally.
-
-The framework relies only on these two loss methods + parameter splitting,
-so it stays detector-agnostic.
+"""탐지기가 공통 인터페이스를 정의.
+supervised_loss: labeled data에서의 손실 계산
+unsupervised_loss: 선생생 모델로부터 수두을 생성하여 unlabeled data에서의 손실 계산
+backbone_parameters / non_backbone_parameters: 연합 학습에서 백본과 비백본 매개변수 구분
+set_thresholds: Epoch Adaptor가 라운마다 pseudo-label 임계값 업데이트를 위해 호출
 """
 from __future__ import annotations
 from abc import ABC, abstractmethod
@@ -21,11 +14,11 @@ import torch.nn.functional as F
 
 
 class BaseDetector(nn.Module, ABC):
-    # Subclasses override these to declare parameter partitioning.
+    # 하위 클래스가 파라미터 분할 규칙을 선언할 때 이 값을 재정의한다.
     BACKBONE_PREFIXES: Tuple[str, ...] = ("backbone",)
     NON_BACKBONE_PREFIXES: Tuple[str, ...] = ("neck", "head")
 
-    # ---- loss API (subclass implements) ---------------------------------
+    # ---- loss API (하위 클래스 구현) ---------------------------------
     @abstractmethod
     def supervised_loss(self, images: torch.Tensor, targets) -> Dict[str, torch.Tensor]:
         ...
@@ -36,7 +29,7 @@ class BaseDetector(nn.Module, ABC):
     ) -> Dict[str, torch.Tensor]:
         ...
 
-    # ---- parameter / state partitioning ---------------------------------
+    # ---- 파라미터 / 상태 분할 ---------------------------------
     def _is_backbone(self, name: str) -> bool:
         return any(name.startswith(p + ".") or name == p for p in self.BACKBONE_PREFIXES)
 
@@ -56,7 +49,7 @@ class BaseDetector(nn.Module, ABC):
                 yield p
 
     def non_backbone_weight_matrices(self) -> Iterable[torch.Tensor]:
-        """Conv/Linear weights in non-backbone for orthogonal regularization."""
+        """직교 정규화에 사용할 non-backbone의 Conv/Linear 가중치를 반환한다."""
         for module_name in self.NON_BACKBONE_PREFIXES:
             module = getattr(self, module_name, None)
             if module is None:
@@ -70,19 +63,19 @@ class BaseDetector(nn.Module, ABC):
         return {k: v for k, v in full.items() if self._is_backbone(k)}
 
     def load_backbone_state_dict(self, sd: Dict[str, torch.Tensor]) -> None:
-        # strict=False because we're only loading a subset
+        # 일부 파라미터만 불러오므로 strict=False를 사용한다.
         missing = self.load_state_dict(sd, strict=False)
-        # Sanity: nothing unexpected (all keys in sd should be in self)
+        # 점검: sd의 모든 키는 현재 모델 안에 존재해야 한다.
         if missing.unexpected_keys:
             raise RuntimeError(f"Unexpected keys in backbone sd: {missing.unexpected_keys}")
 
-    # ---- threshold control (Epoch Adaptor) --------------------------------
+    # ---- 임계값 제어 (Epoch Adaptor) --------------------------------
     def set_thresholds(self, tau_low: float, tau_high: float) -> None:
-        """Update pseudo-label thresholds (called by Epoch Adaptor each round)."""
+        """가짜 라벨 임계값을 갱신한다. 각 라운드마다 Epoch Adaptor가 호출한다."""
         self.tau_low = tau_low
         self.tau_high = tau_high
 
-    # ---- freezing helpers ------------------------------------------------
+    # ---- 동결 보조 함수 ------------------------------------------------
     def freeze_non_backbone(self) -> None:
         for n, p in self.named_parameters():
             if self._is_non_backbone(n):
@@ -94,11 +87,11 @@ class BaseDetector(nn.Module, ABC):
 
 
 # =====================================================================
-# Toy detector for framework-level testing on synthetic data.
-# Replace with a real detector (YOLO etc.) in production.
+# 프레임워크 수준 테스트용 장난감 탐지기.
+# 실제 사용 시에는 진짜 탐지기(YOLO 등)로 교체한다.
 # =====================================================================
 class DummyDetector(BaseDetector):
-    """Classifies presence class + regresses a 2D center. Not a real detector."""
+    """클래스 존재 여부를 분류하고 2D 중심을 회귀하는 간단한 예제 탐지기다."""
 
     def __init__(self, num_classes: int = 5, in_channels: int = 3,
                  tau_low: float = 0.1, tau_high: float = 0.6):
@@ -129,7 +122,7 @@ class DummyDetector(BaseDetector):
         return {"cls": cls_loss, "reg": reg_loss}
 
     def unsupervised_loss(self, images, teacher):
-        # Teacher (local EMA) generates pseudo labels
+        # 선생 모델(local EMA)이 가짜 라벨을 만든다.
         teacher.eval()
         with torch.no_grad():
             t_out = teacher(images)
@@ -137,7 +130,7 @@ class DummyDetector(BaseDetector):
             t_xy = t_out[:, self.num_classes :]
             conf, pseudo_cls = t_cls_probs.max(-1)
 
-        # 3-tier Pseudo Label Assigner (Efficient Teacher)
+        # 3단계 가짜 라벨 할당기(Efficient Teacher)
         hard_mask = conf >= self.tau_high
         soft_mask = (conf >= self.tau_low) & (conf < self.tau_high)
         device = images.device
@@ -154,12 +147,12 @@ class DummyDetector(BaseDetector):
         cls_loss = torch.zeros((), device=device)
         reg_loss = torch.zeros((), device=device)
 
-        # Hard pseudo labels — full weight
+        # hard pseudo label은 전체 가중치로 반영한다.
         if hard_mask.sum() > 0:
             cls_loss = cls_loss + F.cross_entropy(s_cls[hard_mask], pseudo_cls[hard_mask])
             reg_loss = reg_loss + F.smooth_l1_loss(s_xy[hard_mask], t_xy[hard_mask])
 
-        # Soft pseudo labels — weighted by mean teacher confidence
+        # soft pseudo label은 teacher 평균 신뢰도로 가중한다.
         if soft_mask.sum() > 0:
             soft_w = conf[soft_mask].mean()
             cls_loss = cls_loss + soft_w * F.cross_entropy(s_cls[soft_mask], pseudo_cls[soft_mask])

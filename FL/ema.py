@@ -1,10 +1,6 @@
-"""Local Exponential Moving Average teacher model.
-
-Per FedSTO paper (Appendix H.2): each client maintains a local EMA model used
-as pseudo labeler. At the start of every round the EMA weights are re-initialized
-from the freshly broadcast global model, then updated after each local step as:
-
-    W_EMA <- alpha * W_EMA + (1 - alpha) * W_student
+"""local EMA teacher을 관리.
+student 모델을 지수이동평균으로 따라가는 teacher를 만들고 라운드마다 reset/update하는 역할.
+수두라벨 teacher 관리 전담 파일
 """
 from __future__ import annotations
 import copy
@@ -32,7 +28,7 @@ class LocalEMA:
 
     @torch.no_grad()
     def reset_from(self, model: nn.Module) -> None:
-        """Re-initialize EMA weights to match the given model (called at round start)."""
+        """주어진 모델과 같아지도록 EMA 가중치를 다시 초기화한다. 라운드 시작 시 호출한다."""
         self.ema.load_state_dict(model.state_dict())
 
     def to(self, device) -> "LocalEMA":

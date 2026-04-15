@@ -1,8 +1,3 @@
-"""FedSTO: Semi-Supervised Federated Object Detection framework.
-
-Detector-agnostic implementation of the FedSTO algorithm (NeurIPS 2023).
-Plug in your detector by subclassing `BaseDetector`.
-"""
 from .config import FedSTOConfig, OptimConfig
 from .detector import BaseDetector, DummyDetector
 from .ema import LocalEMA

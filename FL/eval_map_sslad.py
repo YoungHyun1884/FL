@@ -1,10 +1,4 @@
-"""mAP evaluation for FedSTO + YOLOv5 on SSLAD-2D val set.
-
-Loads a saved checkpoint, runs inference on the validation set,
-and computes COCO-style mAP (AP@0.5, AP@0.5:0.95) per class.
-
-Usage:
-    python -m FL_YOLO.eval_map --ckpt ./checkpoints_sslad/global_phase2.pt
+"""SSLAD2D 전용 평가 파일
 """
 from __future__ import annotations
 import argparse
@@ -21,10 +15,10 @@ from yolov5.utils.general import non_max_suppression
 from yolov5.utils.metrics import ap_per_class
 
 from .yolov5_detector import YOLOv5Detector
-from .yolo_dataset import SSLAD2DDataset, SSLAD_CLASSES, NUM_SSLAD_CLASSES
+from .sslad_dataset import SSLAD2DDataset, SSLAD_CLASSES, NUM_SSLAD_CLASSES
 
 
-# ---- Paths (same as run_yolov5.py) ----
+# ---- 경로 (run_sslad.py와 동일) ----
 DATA_ROOT = Path("/home/pyh/바탕화면/FL/dataset")
 LABELED_ROOT = DATA_ROOT / "labeled" / "labeled_trainval" / "SSLAD-2D" / "labeled"
 VAL_IMG_DIR = LABELED_ROOT / "val"
@@ -32,7 +26,7 @@ VAL_ANN = LABELED_ROOT / "annotations" / "instance_val.json"
 
 
 def load_model(ckpt_path: str, device: str) -> YOLOv5Detector:
-    """Load YOLOv5Detector from a FedSTO checkpoint."""
+    """FedSTO 체크포인트에서 YOLOv5Detector를 불러온다."""
     model = YOLOv5Detector(num_classes=NUM_SSLAD_CLASSES)
     ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
     model.load_state_dict(ckpt["state_dict"])
@@ -42,7 +36,7 @@ def load_model(ckpt_path: str, device: str) -> YOLOv5Detector:
 
 
 def val_collate(batch):
-    """Collate that returns images, per-image target lists, and original sizes."""
+    """이미지, 이미지별 타깃 목록, 원본 크기를 함께 반환하는 콜레이트 함수다."""
     imgs = torch.stack([b["images"] for b in batch])
     targets_list = [b["targets"] for b in batch]
     orig_sizes = [b["orig_size"] for b in batch]
@@ -50,7 +44,7 @@ def val_collate(batch):
 
 
 class ValDataset(SSLAD2DDataset):
-    """Extends SSLAD2DDataset to also return original image size."""
+    """원본 이미지 크기도 함께 반환하도록 SSLAD2DDataset을 확장한 클래스다."""
 
     def __getitem__(self, idx):
         item = super().__getitem__(idx)
@@ -75,10 +69,10 @@ def run_eval(
         collate_fn=val_collate, num_workers=num_workers, pin_memory=True,
     )
 
-    all_stats = []  # list of (correct, conf, pred_cls, target_cls)
+    all_stats = []  # (correct, conf, pred_cls, target_cls) 목록
     num_targets_per_class = torch.zeros(NUM_SSLAD_CLASSES)
 
-    iouv = torch.linspace(0.5, 0.95, 10).to(device)  # IoU thresholds for mAP@0.5:0.95
+    iouv = torch.linspace(0.5, 0.95, 10).to(device)  # mAP@0.5:0.95용 IoU 임계값들
 
     n_batches = len(loader)
     for bi, (imgs, targets_list, orig_sizes) in enumerate(loader):
@@ -86,12 +80,12 @@ def run_eval(
             print(f"  eval batch {bi}/{n_batches} ...")
         imgs = imgs.to(device)
 
-        # Inference
+        # 추론
         out = model.yolo(imgs)
         preds = out[0] if isinstance(out, (tuple, list)) else out
         nms_preds = non_max_suppression(preds, conf_thres=conf_thres, iou_thres=iou_thres)
 
-        # Per-image evaluation
+        # 이미지별 평가
         for i, pred in enumerate(nms_preds):
             gt = targets_list[i]  # (N, 5) [cls, cx, cy, w, h] normalized
             n_gt = gt.shape[0]
@@ -110,7 +104,7 @@ def run_eval(
                     ))
                 continue
 
-            # pred: (K, 6) [x1, y1, x2, y2, conf, cls] in pixel coords (img_size)
+            # pred: (K, 6) [x1, y1, x2, y2, conf, cls] 픽셀 좌표계(img_size 기준)
             pred_boxes = pred[:, :4]
             pred_conf = pred[:, 4]
             pred_cls = pred[:, 5]
@@ -124,7 +118,7 @@ def run_eval(
                 ))
                 continue
 
-            # Convert GT from normalized [cls, cx, cy, w, h] to pixel [x1, y1, x2, y2]
+            # 정규화된 GT [cls, cx, cy, w, h]를 픽셀 [x1, y1, x2, y2]로 변환한다.
             gt_cls = gt[:, 0].to(device)
             gt_boxes = torch.zeros(n_gt, 4, device=device)
             gt_boxes[:, 0] = (gt[:, 1] - gt[:, 3] / 2) * img_size  # x1
@@ -132,16 +126,16 @@ def run_eval(
             gt_boxes[:, 2] = (gt[:, 1] + gt[:, 3] / 2) * img_size  # x2
             gt_boxes[:, 3] = (gt[:, 2] + gt[:, 4] / 2) * img_size  # y2
 
-            # Compute IoU between predictions and ground truth
+            # 예측과 정답 사이의 IoU를 계산한다.
             iou = box_iou(pred_boxes, gt_boxes)
 
-            # Vectorized matching: class must match
+            # 벡터화된 매칭: 클래스가 같아야 한다.
             cls_match = pred_cls[:, None] == gt_cls[None, :]  # (K, M)
-            iou_masked = iou * cls_match.float()  # zero out cross-class
+            iou_masked = iou * cls_match.float()  # 다른 클래스끼리는 0으로 만든다.
 
             correct = torch.zeros(len(pred), len(iouv), dtype=torch.bool, device=device)
             for j, iou_thresh in enumerate(iouv):
-                # Greedy match: highest IoU first
+                # 탐욕적 매칭: IoU가 큰 것부터 먼저 매칭한다.
                 matches = (iou_masked >= iou_thresh).nonzero(as_tuple=False)
                 if matches.numel():
                     iou_vals = iou_masked[matches[:, 0], matches[:, 1]]
@@ -158,26 +152,26 @@ def run_eval(
 
             all_stats.append((correct, pred_conf, pred_cls, gt_cls))
 
-    # Concatenate stats
+    # 통계값을 이어 붙인다.
     stats = [torch.cat(x, 0).cpu().numpy() for x in zip(*all_stats)]
 
     if len(stats) == 0 or len(stats[0]) == 0:
         print("No detections found!")
         return
 
-    # Compute AP using yolov5's ap_per_class
+    # yolov5의 ap_per_class로 AP를 계산한다.
     tp, conf, pred_cls, target_cls = stats
     names = {i: name for i, name in enumerate(SSLAD_CLASSES)}
     results = ap_per_class(tp, conf, pred_cls, target_cls, names=names)
 
-    # ap_per_class returns (tp, fp, p, r, f1, ap, unique_classes)
+    # ap_per_class는 (tp, fp, p, r, f1, ap, unique_classes)를 반환한다.
     tp_curve, fp_curve, p, r, f1, ap, classes = results
 
-    # ap shape: (num_classes, num_iou_thresholds)
+    # ap의 형태는 (num_classes, num_iou_thresholds)이다.
     ap50 = ap[:, 0] if ap.ndim == 2 else ap
     ap5095 = ap.mean(1) if ap.ndim == 2 else ap
 
-    # Print results
+    # 결과를 출력한다.
     print(f"\n{'Class':<15} {'Images':>7} {'Targets':>8} {'P':>7} {'R':>7} {'mAP@.5':>8} {'mAP@.5:.95':>10}")
     print("-" * 70)
 
@@ -186,7 +180,7 @@ def run_eval(
         nt = int(num_targets_per_class[c])
         print(f"{name:<15} {len(val_ds):>7} {nt:>8} {p[i]:>7.3f} {r[i]:>7.3f} {ap50[i]:>8.3f} {ap5095[i]:>10.3f}")
 
-    # Overall
+    # 전체 결과
     mp, mr = p.mean(), r.mean()
     map50 = ap50.mean()
     map5095 = ap5095.mean()
@@ -196,7 +190,7 @@ def run_eval(
 
 
 def box_iou(box1, box2):
-    """Compute IoU between two sets of boxes. (N, 4) x (M, 4) -> (N, M)"""
+    """두 박스 집합 사이의 IoU를 계산한다. (N, 4) x (M, 4) -> (N, M)"""
     area1 = (box1[:, 2] - box1[:, 0]) * (box1[:, 3] - box1[:, 1])
     area2 = (box2[:, 2] - box2[:, 0]) * (box2[:, 3] - box2[:, 1])
 

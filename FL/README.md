@@ -21,7 +21,7 @@ python -m FL_YOLO.main
 **Real YOLOv5 end-to-end (synthetic YOLO-format data, ~1 min on CPU):**
 
 ```bash
-python -m FL_YOLO.run_yolov5
+python -m FL_YOLO.run_sslad
 ```
 
 Expected output:
@@ -57,9 +57,9 @@ FL_YOLO/
 ├── server.py              # Server.warmup / update(use_ortho=...)
 ├── orchestrator.py        # FedSTO.run() — Algorithm 1 main loop
 ├── main.py                # framework sanity check (DummyDetector)
-├── run_yolov5.py          # real YOLOv5 entry point
+├── run_sslad.py           # SSLAD-2D training entry point
 ├── yolov5_detector.py     # YOLOv5Detector adapter (ultralytics yolov5)
-└── yolo_dataset.py        # Synthetic YOLO-format data + non-IID weather split
+└── sslad_dataset.py       # SSLAD-2D dataset loaders + non-IID city split
 ```
 
 ## Algorithm 1 mapping
@@ -80,7 +80,7 @@ FL_YOLO/
 
 ## Swapping in real data (BDD100K / Cityscapes / SODA10M)
 
-Only `data/yolo_dataset.py` needs to change. Build a `Dataset` that yields:
+Only the dataset module (for example `sslad_dataset.py`) needs to change. Build a `Dataset` that yields:
 
 ```python
 # labeled sample (server)
@@ -126,7 +126,7 @@ ortho reg) is detector-agnostic.
 
 1. **Pretrained weights**: COCO-pretrained weights are now loaded
    automatically by default (`pretrained=True` in `YOLOv5Detector`).
-   Pass `--no-pretrained` to `run_yolov5.py` to disable.
+   Pass `--no-pretrained` to `run_sslad.py` to disable.
    Default thresholds (`tau_high=0.5`, `tau_low=0.05`) are tuned for
    pretrained initialization per the paper.
 2. **BatchNorm in aggregation**: `fedavg` averages float buffers (BN

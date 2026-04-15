@@ -1,8 +1,3 @@
-"""FedSTO configuration.
-
-All knobs in one place. Sizes/steps default to small values so the synthetic
-main.py runs in seconds; scale up for real datasets.
-"""
 from dataclasses import dataclass, field
 from typing import Tuple
 
@@ -16,55 +11,54 @@ class OptimConfig:
 
 @dataclass
 class FedSTOConfig:
-    # Rounds (paper: 300 total = 50 warmup + 100 T1 + 150 T2)
-    warmup_rounds: int = 50           # server supervised pretraining rounds
-    T1: int = 100                     # Phase 1 (Selective Training) rounds
-    T2: int = 150                     # Phase 2 (FPT + Orthogonal) rounds
-    local_epochs: int = 1             # local epochs per client per round (paper: 1)
-    server_steps: int = 20            # server supervised steps after aggregation
+    # 라운드 수 (논문 기준: 총 300 = warmup 50 + T1 100 + T2 150)
+    warmup_rounds: int = 50           # 서버 지도 사전학습 라운드 수
+    T1: int = 100                     # 1단계(선택적 학습) 라운드 수
+    T2: int = 150                     # 2단계(FPT + 직교 보정) 라운드 수
+    local_epochs: int = 1             # 라운드당 클라이언트 로컬 에폭 수 (논문 기준 1)
+    server_steps: int = 20            # 집계 후 서버 지도학습 스텝 수
 
-    # Federated sampling
-    num_clients: int = 3              # paper: 3 (Clear / Night / Adverse)
-    client_sample_ratio: float = 1.0  # 1.0 = all clients every round
+    # 연합 샘플링
+    num_clients: int = 3              # 논문 기준 3개 (맑음 / 야간 / 악천후)
+    client_sample_ratio: float = 1.0  # 1.0이면 매 라운드 모든 클라이언트 참여
 
-    # Local EMA teacher
+    # 로컬 EMA teacher
     ema_decay: float = 0.999
-    reset_ema_each_round: bool = True # re-init local EMA from broadcast global
+    reset_ema_each_round: bool = True # broadcast된 global로 로컬 EMA를 다시 초기화
 
-    # Pseudo-label thresholds (paper: ignore threshold 0.1 ~ 0.6)
-    tau_low: float = 0.1              # NMS confidence threshold / soft boundary
-    tau_high: float = 0.6             # hard pseudo-label boundary
+    # 가짜 라벨 임계값 (논문 기준: ignore threshold 0.1 ~ 0.6)
+    tau_low: float = 0.1              # NMS confidence 임계값 / soft 경계
+    tau_high: float = 0.6             # hard pseudo-label 경계
 
-    # Epoch Adaptor: linearly schedule thresholds over training
+    # Epoch Adaptor: 학습 동안 임계값을 선형으로 조정
     use_epoch_adaptor: bool = True
-    tau_low_start: float = 0.1        # tau_low at training start (constant per paper)
-    tau_high_start: float = 0.3       # tau_high at training start
+    tau_low_start: float = 0.1        # 학습 시작 시 tau_low 값 (논문 기준 고정)
+    tau_high_start: float = 0.3       # 학습 시작 시 tau_high 값
 
-    # Unsupervised loss weight
+    # 비지도 손실 가중치
     unsup_loss_weight: float = 4.0
 
-    # Orthogonal regularization (SRIP)
+    # 직교 정규화(SRIP)
     ortho_lambda: float = 1e-3
-    ortho_power_iters: int = 1        # power iteration steps for spectral norm
+    ortho_power_iters: int = 1        # spectral norm 계산용 power iteration 횟수
 
-    # Optimizers
+    # 옵티마이저
     server_opt: OptimConfig = field(default_factory=OptimConfig)
     client_opt: OptimConfig = field(default_factory=OptimConfig)
 
-    # Runtime
+    # 실행 환경
     device: str = "cuda"
     seed: int = 42
 
-    # Logging
+    # 로깅
     log_every: int = 1
     ckpt_dir: str = "./checkpoints"
 
     def get_thresholds(self, progress: float) -> Tuple[float, float]:
-        """Return (tau_low, tau_high) for the given training progress in [0, 1].
+        """주어진 학습 진행률 [0, 1]에 대한 (tau_low, tau_high)를 반환한다.
 
-        When ``use_epoch_adaptor`` is True the thresholds are linearly
-        interpolated from their ``*_start`` values to the final values,
-        mimicking the Efficient Teacher Epoch Adaptor.
+        ``use_epoch_adaptor``가 True이면 ``*_start`` 값에서 최종 값까지
+        임계값을 선형 보간해 Efficient Teacher의 Epoch Adaptor를 흉내 낸다.
         """
         progress = max(0.0, min(1.0, progress))
         if not self.use_epoch_adaptor:

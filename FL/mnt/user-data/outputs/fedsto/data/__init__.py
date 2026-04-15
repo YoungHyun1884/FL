@@ -1,4 +1,4 @@
-from .yolo_dataset import (
+from .sslad_dataset import (
     SyntheticYOLODataset,
     labeled_yolo_collate,
     unlabeled_yolo_collate,
