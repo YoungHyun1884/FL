@@ -154,6 +154,9 @@ def main():
         log_every=1,
     )
     print(f"device = {cfg.device}")
+    n_gpus = torch.cuda.device_count() if str(cfg.device).startswith("cuda") else 0
+    if n_gpus > 1:
+        print(f"client devices = {[f'cuda:{i}' for i in range(n_gpus)]}")
     print(
         "Phase1 ablation:",
         f"hard_only={cfg.phase1_hard_only}",
@@ -204,10 +207,16 @@ def main():
 
     clients = []
     for cid, ds in enumerate(client_datasets):
+        client_device = f"cuda:{(cid + 1) % n_gpus}" if n_gpus > 1 else cfg.device
+        generator = None
+        if n_gpus > 1:
+            generator = torch.Generator()
+            generator.manual_seed(cfg.seed + 1000 + cid)
         loader = DataLoader(
             ds, batch_size=args.batch_size, shuffle=True,
             collate_fn=unlabeled_yolo_collate, drop_last=True,
             num_workers=args.num_workers, pin_memory=True,
+            generator=generator,
         )
         clients.append(Client(
             client_id=cid,
@@ -215,6 +224,7 @@ def main():
             loader=loader,
             cfg=cfg,
             num_samples=len(ds),
+            device=client_device,
         ))
 
     nw = args.num_workers

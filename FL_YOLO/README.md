@@ -24,6 +24,66 @@ python -m FL_YOLO.main
 python -m FL_YOLO.run_SSLAD2D
 ```
 
+### Run BDD100K with 2 GPUs
+
+프로젝트 루트에서 실행합니다.
+
+```bash
+cd /home/pyh/바탕화면/FL_GIT
+```
+
+먼저 PyTorch가 GPU 2개를 보는지 확인합니다.
+
+```bash
+python -c "import torch; print(torch.cuda.device_count(), [torch.cuda.get_device_name(i) for i in range(torch.cuda.device_count())])"
+```
+
+BDD100K 전체 학습은 다음처럼 실행합니다.
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1 python -m FL_YOLO.run_bdd100k
+```
+
+실행 초반에 아래처럼 출력되면 클라이언트가 GPU 2개에 자동 배정된 것입니다.
+
+```text
+device = cuda
+client devices = ['cuda:0', 'cuda:1']
+```
+
+처음에는 짧은 스모크 테스트로 2 GPU 동작만 확인하는 것을 권장합니다.
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1 python -m FL_YOLO.run_bdd100k \
+  --warmup-rounds 1 \
+  --t1 1 \
+  --t2 1 \
+  --max-per-client 100 \
+  --max-server-images 100 \
+  --batch-size 8 \
+  --num-workers 2
+```
+
+다른 터미널에서 GPU 사용률을 확인합니다.
+
+```bash
+watch -n 0.5 nvidia-smi
+```
+
+참고:
+
+- `CUDA_VISIBLE_DEVICES=0,1`은 실제 GPU 0번과 1번만 이 프로세스에 보이게 합니다.
+- `CUDA_VISIBLE_DEVICES=2,3`처럼 실행하면 코드 안에서는 여전히 `cuda:0`, `cuda:1`로 보이지만, 실제로는 물리 GPU 2번과 3번을 씁니다.
+- 클라이언트는 server/global 모델이 있는 `cuda:0` 부담을 줄이기 위해 `cuda:1`, `cuda:0`, `cuda:1` 순서로 라운드로빈 배정됩니다.
+- 같은 GPU에 배정된 클라이언트는 동시에 올리지 않고 순서대로 실행해서 OOM 위험을 줄입니다.
+- OOM이 나면 `--batch-size`를 먼저 낮추고, CPU 병목이 있으면 `--num-workers`를 낮춰 봅니다.
+
+SSLAD-2D도 같은 방식으로 실행할 수 있습니다.
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1 python -m FL_YOLO.run_SSLAD2D
+```
+
 Expected output:
 
 ```

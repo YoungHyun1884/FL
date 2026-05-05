@@ -91,12 +91,7 @@ class BaseDetector(nn.Module, ABC):
             p.requires_grad_(True)
 
 
-# =====================================================================
-# 프레임워크 동작 확인용 더미 탐지기
-        # 실제 학습에서는 실제 탐지기로 교체한다.
-# =====================================================================
 class DummyDetector(BaseDetector):
-    """클래스 존재 여부와 2차원 중심점을 예측하는 간단한 더미 탐지기."""
 
     def __init__(self, num_classes: int = 5, in_channels: int = 3,
                  tau_low: float = 0.1, tau_high: float = 0.6):
@@ -112,7 +107,7 @@ class DummyDetector(BaseDetector):
             nn.AdaptiveAvgPool2d(4),
         )
         self.neck = nn.Sequential( 
-            nn.Flatten(), nn.Linear(32 * 16, 64), nn.ReLU(), # 32*4*4=512 -> 64로 차원 축소하는 간단한 neck (백본에서 추출된 특징을 더 작은 차원으로 변환)
+            nn.Flatten(), nn.Linear(32 * 16, 64), nn.ReLU(), 
         )
         self.head = nn.Linear(64, num_classes + 2)  # 
 
@@ -128,7 +123,7 @@ class DummyDetector(BaseDetector):
         return {"cls": cls_loss, "reg": reg_loss}
 
     def unsupervised_loss(self, images, teacher):
-        # 교사 모델이 의사 라벨을 생성한다.
+        # 교사 모델이 수도 라벨을 생성한다.
         teacher.eval()
         with torch.no_grad():
             t_out = teacher(images)
@@ -136,7 +131,7 @@ class DummyDetector(BaseDetector):
             t_xy = t_out[:, self.num_classes :]
             conf, pseudo_cls = t_cls_probs.max(-1)
 
-        # 3단계 의사 라벨 할당
+        # 3단계 수도 라벨 할당
         hard_mask = conf >= self.tau_high
         soft_mask = (conf >= self.tau_low) & (conf < self.tau_high)
         device = images.device

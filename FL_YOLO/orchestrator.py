@@ -3,7 +3,9 @@
 from __future__ import annotations
 import os
 import random
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
+from threading import Lock
 from typing import Callable, List
 
 import torch
@@ -58,6 +60,47 @@ class FedSTO:
 
     def _pull_into_server(self, sd: dict) -> None:
         self.server.model.load_state_dict(sd, strict=False)
+
+    def _global_state_snapshot(self) -> dict:
+        return {
+            k: v.detach().cpu().clone()
+            for k, v in self.global_model.state_dict().items()
+        }
+
+    def _run_clients(
+        self,
+        selected: List[Client],
+        phase: int,
+        tau_low: float,
+        tau_high: float,
+    ) -> list[dict]:
+        train_name = "train_phase1" if phase == 1 else "train_phase2"
+        devices = {str(c.device) for c in selected}
+
+        def train_one(c: Client, source) -> dict:
+            device = torch.device(c.device)
+            if device.type == "cuda" and device.index is not None:
+                torch.cuda.set_device(device)
+            return getattr(c, train_name)(
+                source,
+                tau_low=tau_low,
+                tau_high=tau_high,
+            )
+
+        if len(devices) <= 1:
+            return [train_one(c, self.global_model) for c in selected]
+
+        global_state = self._global_state_snapshot()
+        device_locks = {device: Lock() for device in devices}
+
+        def run_one(c: Client) -> dict:
+            # 같은 GPU에 배정된 클라이언트는 동시에 올리지 않아 OOM/경합을 피한다.
+            with device_locks[str(c.device)]:
+                return train_one(c, global_state)
+
+        with ThreadPoolExecutor(max_workers=len(selected)) as ex:
+            futures = [ex.submit(run_one, c) for c in selected]
+            return [f.result() for f in futures]
 
     def _log(self, phase: str, rnd: int, **kv) -> None:
         rec = {"phase": phase, "round": rnd, **kv}
@@ -132,10 +175,7 @@ class FedSTO:
                 tau_low, tau_high = self.cfg.get_thresholds(progress)
 
                 selected = self._sample_clients() #이번 라운드 참여 클라이언트 목록
-                client_updates = [] 
-                for c in selected: #각 클라이언트를 하나씩 반복
-                    upd = c.train_phase1(self.global_model, tau_low=tau_low, tau_high=tau_high)
-                    client_updates.append(upd) # => client_updats안에는 클라이언트 3개의 결과가 쌓임임
+                client_updates = self._run_clients(selected, phase=1, tau_low=tau_low, tau_high=tau_high)
 
                 # 클라이언트 샘플링 결과를 평균내어 백본을 집계한다.
                 agg_backbone = fedavg( 
@@ -176,10 +216,7 @@ class FedSTO:
             tau_low, tau_high = self.cfg.get_thresholds(progress)
 
             selected = self._sample_clients()
-            client_updates = []
-            for c in selected:
-                upd = c.train_phase2(self.global_model, tau_low=tau_low, tau_high=tau_high)
-                client_updates.append(upd)
+            client_updates = self._run_clients(selected, phase=2, tau_low=tau_low, tau_high=tau_high)
 
             # 전체 파라미터를 집계
             agg_full = fedavg(

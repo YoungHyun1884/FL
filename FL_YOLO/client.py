@@ -3,6 +3,7 @@ global model 받아오기 -> local EMA teacher 준비 -> unlabeled 이미지로 
 Phase 1에서는 backbone만, Phase 2에서는 전체 파라미터를 업데이트.
 """
 from __future__ import annotations
+from collections.abc import Mapping
 from typing import Dict
 
 import torch
@@ -22,18 +23,22 @@ class Client:
         loader: DataLoader,
         cfg: FedSTOConfig,
         num_samples: int,
+        device: str | torch.device | None = None,
     ):
         self.cid = client_id
-        self.model = model.to(cfg.device)
+        self.device = device or cfg.device
+        self.model = model.to(self.device)
         self.loader = loader
         self.cfg = cfg
         self.num_samples = num_samples
-        self.device = cfg.device
         self.local_ema: LocalEMA | None = None
 
     # -------- 라운드 시작 동기화 ------------------------------------------
-    def _sync_from_global(self, global_model: BaseDetector) -> None: #client는 이전 라운드의 자신의 로컬 모델을 이어서 학습 x 매 라운드 글로벌 기준점에서 다시 시작
-        self.model.load_state_dict(global_model.state_dict())
+    def _sync_from_global(self, global_model: BaseDetector | Mapping[str, torch.Tensor]) -> None: #client는 이전 라운드의 자신의 로컬 모델을 이어서 학습 x 매 라운드 글로벌 기준점에서 다시 시작
+        if isinstance(global_model, Mapping):
+            self.model.load_state_dict(global_model)
+        else:
+            self.model.load_state_dict(global_model.state_dict())
         if self.local_ema is None: #첫 라운드에 teacher가 없으니 현재 student 모델을 복사
             self.local_ema = LocalEMA(self.model, decay=self.cfg.ema_decay)
             self.local_ema.to(self.device)
@@ -41,7 +46,7 @@ class Client:
             self.local_ema.reset_from(self.model)
 
     def train_phase1(
-        self, global_model: BaseDetector,
+        self, global_model: BaseDetector | Mapping[str, torch.Tensor],
         tau_low: float | None = None, tau_high: float | None = None,
     ) -> Dict:
         self._sync_from_global(global_model) #현재 클라이언트 모델을 글로벌 모델과 맞춤
@@ -97,7 +102,7 @@ class Client:
         }
 
     def train_phase2(
-        self, global_model: BaseDetector,
+        self, global_model: BaseDetector | Mapping[str, torch.Tensor],
         tau_low: float | None = None, tau_high: float | None = None,
     ) -> Dict:
         self._sync_from_global(global_model)
